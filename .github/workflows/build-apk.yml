@@ -1,0 +1,62 @@
+name: Build Android APK
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+permissions:
+  contents: write
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container:
+      image: barichello/godot-ci:4.3
+    steps:
+      - uses: actions/checkout@v4
+      - name: Locate project (root, or unzip the first .zip in the repo)
+        run: |
+          if [ -f project.godot ]; then P=.; else Z=$(ls *.zip | head -n 1); unzip -q "$Z" -d src; P=src/ninjago_toe; fi
+          echo "P=$P" >> $GITHUB_ENV
+      - name: Configure Godot Android export
+        run: |
+          mkdir -p ~/.config/godot ~/.local/share/godot/export_templates
+          if [ -d /root/.local/share/godot/templates/${GODOT_VERSION}.stable ]; then
+            mv /root/.local/share/godot/templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
+          fi
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore ~/debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          SDK="${ANDROID_HOME:-/usr/lib/android-sdk}"
+          for f in editor_settings-4.tres editor_settings-4.3.tres; do
+            printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\nexport/android/android_sdk_path = "%s"\nexport/android/debug_keystore = "%s/debug.keystore"\nexport/android/debug_keystore_user = "androiddebugkey"\nexport/android/debug_keystore_pass = "android"\nexport/android/shutdown_adb_on_exit = true\n' "$SDK" "$HOME" > ~/.config/godot/$f
+          done
+      - name: Import resources and print script errors
+        run: |
+          cd "$P"
+          godot --headless --import 2>&1 | tee ../import.log || true
+          godot --headless --import 2>&1 | tee -a ../import.log || true
+      - name: Export APK
+        run: |
+          cd "$P"
+          mkdir -p build
+          godot --headless --export-debug "Android" build/ninjago_toe.apk 2>&1 | tee ../export.log
+          ls -l build
+      - name: Upload logs (always)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-logs
+          path: |
+            import.log
+            export.log
+            src/import.log
+            src/export.log
+          if-no-files-found: ignore
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ninjago-apk
+          path: ${{ env.P }}/build/ninjago_toe.apk
+      - name: Publish APK to Releases (direct download)
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: apk-${{ github.run_number }}
+          name: APK build ${{ github.run_number }}
+          files: ${{ env.P }}/build/ninjago_toe.apk

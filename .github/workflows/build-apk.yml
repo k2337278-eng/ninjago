@@ -12,38 +12,64 @@ jobs:
       image: barichello/godot-ci:4.3
     steps:
       - uses: actions/checkout@v4
-      - name: Locate project (root, or unzip the first .zip in the repo)
+      - name: Locate project (root, or the last-named .zip in the repo)
+        shell: bash
         run: |
-          if [ -f project.godot ]; then P=.; else Z=$(ls *.zip | head -n 1); unzip -q "$Z" -d src; P=src/ninjago_toe; fi
+          if [ -f project.godot ]; then P=.; else Z=$(ls -1 *.zip | LC_ALL=C sort | tail -n 1); echo "Using zip: $Z"; unzip -q "$Z" -d src; P=src/ninjago_toe; fi
           echo "P=$P" >> $GITHUB_ENV
       - name: Configure Godot Android export
+        shell: bash
         run: |
-          mkdir -p ~/.config/godot ~/.local/share/godot/export_templates
-          if [ -d /root/.local/share/godot/templates/${GODOT_VERSION}.stable ]; then
-            mv /root/.local/share/godot/templates/${GODOT_VERSION}.stable ~/.local/share/godot/export_templates/${GODOT_VERSION}.stable
-          fi
-          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore ~/debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
+          T=~/.local/share/godot/export_templates/4.3.stable
+          mkdir -p ~/.config/godot "$T"
+          SRC=$(find / -type f -name android_debug.apk -not -path "/proc/*" 2>/dev/null | head -n 1)
+          if [ -n "$SRC" ]; then cp -r "$(dirname "$SRC")"/. "$T"/; fi
+          JBIN=$(readlink -f "$(command -v javac)" 2>/dev/null || true)
+          JAVA_DIR=${JAVA_HOME:-$(dirname "$(dirname "$JBIN")")}
           SDK="${ANDROID_HOME:-/usr/lib/android-sdk}"
+          keytool -keyalg RSA -genkeypair -alias androiddebugkey -keypass android -keystore ~/debug.keystore -storepass android -dname "CN=Android Debug,O=Android,C=US" -validity 9999 -deststoretype pkcs12
           for f in editor_settings-4.tres editor_settings-4.3.tres; do
-            printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\nexport/android/android_sdk_path = "%s"\nexport/android/debug_keystore = "%s/debug.keystore"\nexport/android/debug_keystore_user = "androiddebugkey"\nexport/android/debug_keystore_pass = "android"\nexport/android/shutdown_adb_on_exit = true\n' "$SDK" "$HOME" > ~/.config/godot/$f
+            printf '[gd_resource type="EditorSettings" format=3]\n\n[resource]\nexport/android/android_sdk_path = "%s"\nexport/android/java_sdk_path = "%s"\nexport/android/debug_keystore = "%s/debug.keystore"\nexport/android/debug_keystore_user = "androiddebugkey"\nexport/android/debug_keystore_pass = "android"\nexport/android/shutdown_adb_on_exit = true\n' "$SDK" "$JAVA_DIR" "$HOME" > ~/.config/godot/$f
           done
+          {
+            echo "HOME=$HOME"
+            echo "template source: $SRC"
+            echo "java dir: $JAVA_DIR"
+            echo "android sdk: $SDK"
+            ls -l "$T"
+          } > "$GITHUB_WORKSPACE/diag.log" 2>&1
+          cat "$GITHUB_WORKSPACE/diag.log"
       - name: Import resources and print script errors
+        shell: bash
         run: |
           cd "$P"
           godot --headless --import 2>&1 | tee ../import.log || true
           godot --headless --import 2>&1 | tee -a ../import.log || true
       - name: Export APK
+        shell: bash
         run: |
           cd "$P"
           mkdir -p build
           godot --headless --export-debug "Android" build/ninjago_toe.apk 2>&1 | tee ../export.log
+          test -s build/ninjago_toe.apk || { echo "APK was NOT built"; exit 1; }
           ls -l build
+      - name: Verify no script errors
+        if: always()
+        shell: bash
+        run: |
+          L="$P/../import.log"
+          if [ -f "$L" ] && grep -q "SCRIPT ERROR" "$L"; then
+            echo "Script errors found:"
+            grep -A1 "SCRIPT ERROR" "$L" | head -60
+            exit 1
+          fi
       - name: Upload logs (always)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: build-logs
           path: |
+            diag.log
             import.log
             export.log
             src/import.log
